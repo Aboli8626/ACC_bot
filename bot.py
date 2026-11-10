@@ -1,12 +1,9 @@
 import os
 import logging
 import asyncio
-import json
-import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
-from bs4 import BeautifulSoup
-from curl_cffi import requests
+import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 
@@ -16,12 +13,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# دریافت امن توکن از متغیرهای محیطی سیستم (تنظیم شده در Railway)
+# دریافت امن توکن از متغیرهای محیطی سیستم
 TOKEN = os.getenv("TOKEN", "YOUR_BOT_TOKEN_HERE")
 
-def fetch_market_data():
+async def fetch_market_data():
     """
-    دریافت قیمت‌های زنده و لحظه‌ای بازار از طریق APIهای آزاد و معتبر بدون محدودیت کلادفلر
+    دریافت قیمت‌های زنده و بدون محدودیت از APIهای پایدار و آزاد عمومی
     """
     data = {
         "usd": 0,
@@ -31,59 +28,38 @@ def fetch_market_data():
         "coin": 0
     }
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*"
-    }
-
-    try:
-        # استفاده از وب‌سرویس عمومی و آزاد برای دریافت نرخ‌های لحظه‌ای ارز و طلا
-        response = requests.get(
-            "https://api.tgju.org/v1/market/indicator/summary-json-custom", 
-            headers=headers, 
-            timeout=8
-        )
-        
-        # اگر منبع اول پاسخ نداد، از منبع پشتیبان استفاده می‌کنیم
-        if response.status_code != 200:
-            response = requests.get(
-                "https://brsapi.ir/free/exchange/prices.php", 
-                headers=headers, 
-                timeout=8
-            )
-
-        if response.status_code == 200:
-            res_json = response.json()
-            
-            # استخراج داده‌ها بسته به ساختار JSON دریافتی
-            # (اگر ساختار به صورت لیست باشد جستجو می‌کنیم)
-            if isinstance(res_json, list):
-                for item in res_json:
-                    title = str(item.get("title", "")).lower()
-                    price_str = str(item.get("price", "0")).replace(",", "")
-                    if price_str.isdigit():
-                        price = int(price_str)
-                        if "دلار" in title and data["usd"] == 0:
+    # استفاده از کتابخانه سبک و سریع httpx برای درخواست‌های آسنکرون
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            # درخواست به API عمومی و آزاد بازار
+            response = await client.get("https://brsapi.ir/free/exchange/prices.php")
+            if response.status_code == 200:
+                res_json = response.json()
+                
+                # بررسی و استخراج نرخ ارزها
+                if "currency" in res_json:
+                    for item in res_json["currency"]:
+                        name = item.get("name", "")
+                        price = int(item.get("price", 0))
+                        if "دلار" in name and data["usd"] == 0:
                             data["usd"] = price
-                        elif "یورو" in title and data["eur"] == 0:
+                        elif "یورو" in name and data["eur"] == 0:
                             data["eur"] = price
-                        elif "18" in title and "طلا" in title and data["gold_18k"] == 0:
+                            
+                # بررسی و استخراج طلا و سکه
+                if "gold" in res_json:
+                    for item in res_json["gold"]:
+                        name = item.get("name", "")
+                        price = int(item.get("price", 0))
+                        if "عیار" in name and data["gold_18k"] == 0:
                             data["gold_18k"] = price
-                        elif "امامی" in title and "سکه" in title and data["coin"] == 0:
+                        elif "امامی" in name and data["coin"] == 0:
                             data["coin"] = price
                             
-            elif isinstance(res_json, dict):
-                # اگر پاسخ دیکشنری باشد
-                prices_dict = res_json.get("data", res_json)
-                if "usd" in prices_dict: data["usd"] = int(str(prices_dict["usd"]).replace(",", ""))
-                if "eur" in prices_dict: data["eur"] = int(str(prices_dict["eur"]).replace(",", ""))
-                if "gold_18k" in prices_dict: data["gold_18k"] = int(str(prices_dict["gold_18k"]).replace(",", ""))
-                if "coin" in prices_dict: data["coin"] = int(str(prices_dict["coin"]).replace(",", ""))
+        except Exception as e:
+            logger.error(f"Error fetching market data from API: {e}")
 
-    except Exception as e:
-        logger.error(f"Error fetching live market data: {e}")
-
-    # اگر به هر دلیل اتصال اینترنت سرور لحظه‌ای قطع بود، محاسبه و بازگشت مقادیر منطقی
+    # مقادیر پشتیبان واقعی (در صورت قطعی اینترنت بین‌الملل یا سرور API)
     if data["usd"] == 0: data["usd"] = 260800
     if data["eur"] == 0: data["eur"] = 292700
     if data["gold_18k"] == 0: data["gold_18k"] = 25762962
@@ -92,7 +68,7 @@ def fetch_market_data():
     if data["gold_24k"] == 0:
         data["gold_24k"] = int(data["gold_18k"] * (4 / 3))
         
-    # محاسبه قیمت سکه
+    # محاسبه قیمت سکه اگر مستقیم خوانده نشد
     if data["coin"] == 0 and data["gold_18k"] > 0:
         pure_gold_weight = 8.133 * (18 / 24)
         intrinsic = pure_gold_weight * data["gold_18k"]
@@ -114,7 +90,7 @@ def calculate_coin_bubble(gold_18k_toman, coin_price_toman):
     return 0, 0, 0
 
 async def get_price_text():
-    prices = fetch_market_data()
+    prices = await fetch_market_data()
     intrinsic, bubble_amt, bubble_pct = calculate_coin_bubble(prices["gold_18k"], prices["coin"])
     
     text = (
@@ -152,7 +128,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "refresh_prices":
         await price_command(update, context)
 
-# پاسخ به پیام‌های متنی فارسی کاربر
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text.strip()
     keywords = ["قیمت", "دلار", "طلا", "سکه", "ارز", "قیمتها", "نرخ", "یورو"]
