@@ -3,59 +3,49 @@ import os
 import logging
 import asyncio
 import threading
-import time
-
-from datetime import datetime, timezone, timedelta
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from datetime import datetime, timezone
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import httpx
-
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ParseMode
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
-    ApplicationBuilder,
-    ContextTypes,
+    Application,
     CommandHandler,
-    CallbackQueryHandler,
     MessageHandler,
-    filters
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
 )
 
-
-# ==========================================
-# 1. SETTINGS
-# ==========================================
+# -------------------- تنظیمات اصلی --------------------
 
 TOKEN = os.getenv("TOKEN")
-
 API_URL = "https://nerkhara.com/api/v1/latest.json"
 
 CACHE_SECONDS = 45
-MAX_PRICE_AGE_MINUTES = 90
-
-TEHRAN_TIMEZONE = timezone(timedelta(hours=3, minutes=30))
+MAX_DATA_AGE_MINUTES = 90
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
 )
-
 logger = logging.getLogger(__name__)
 
-
-# ==========================================
-# 2. ASSETS
-# ==========================================
+# -------------------- شناسه دارایی‌ها --------------------
 
 CURRENCIES = {
-    "usd": "🇺🇸 دلار آمریکا",
-    "eur": "🇪🇺 یورو",
-    "gbp": "🇬🇧 پوند انگلیس",
-    "try": "🇹🇷 لیر ترکیه",
-    "cny": "🇨🇳 یوان چین",
-    "azn": "🇦🇿 منات آذربایجان",
-    "aed": "🇦🇪 درهم امارات",
-    "usdt": "💲 تتر"
+    "usd": "دلار آمریکا",
+    "eur": "یورو",
+    "gbp": "پوند انگلیس",
+    "try": "لیر ترکیه",
+    "cny": "یوان چین",
+    "azn": "منات آذربایجان",
+    "aed": "درهم امارات",
+    "usdt": "تتر",
 }
 
 METALS = {
@@ -63,637 +53,449 @@ METALS = {
     "gold-24k": "طلای ۲۴ عیار",
     "coin-emami": "سکه امامی",
     "coin-half": "نیم سکه",
-    "coin-quarter": "ربع سکه"
+    "coin-quarter": "ربع سکه",
 }
 
-CRYPTO = {
-    "btc": ("₿", "بیت‌کوین"),
-    "eth": ("Ξ", "اتریوم"),
-    "sol": ("◎", "سولانا"),
-    "xrp": ("✕", "ریپل"),
-    "bnb": ("◆", "بایننس‌کوین"),
-    "doge": ("Ð", "دوج‌کوین"),
-    "trx": ("◈", "ترون"),
-    "ton": ("💎", "تون")
+CRYPTOS = {
+    "btc": "بیت‌کوین",
+    "eth": "اتریوم",
+    "sol": "سولانا",
+    "xrp": "ریپل",
+    "bnb": "بایننس کوین",
+    "doge": "دوج کوین",
+    "trx": "ترون",
+    "ton": "تون",
 }
 
+# -------------------- کش اطلاعات --------------------
 
-# ==========================================
-# 3. CACHE
-# ==========================================
-
-price_cache = {
-    "data": None,
-    "time": 0
-}
-
+market_cache = None
+cache_time = 0
 cache_lock = asyncio.Lock()
 
 
-# ==========================================
-# 4. TIME VALIDATION
-# ==========================================
+def to_float(value):
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (ValueError, TypeError):
+        return None
 
-def parse_api_time(value):
 
+def parse_datetime(value):
     if not value:
-        raise ValueError("API timestamp is missing")
+        return None
 
-    dt = datetime.fromisoformat(
-        value.replace("Z", "+00:00")
-    )
+    try:
+        value = str(value).replace("Z", "+00:00")
+        result = datetime.fromisoformat(value)
 
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        if result.tzinfo is None:
+            result = result.replace(tzinfo=timezone.utc)
 
-    return dt.astimezone(timezone.utc)
+        return result
+    except (ValueError, TypeError):
+        return None
 
 
-def validate_item(item, asset_id):
-
-    if not item:
-        raise ValueError(f"Missing asset: {asset_id}")
+def validate_item(item, expected_unit=None):
+    if not isinstance(item, dict):
+        return False
 
     if item.get("stale") is True:
-        raise ValueError(f"Stale price: {asset_id}")
+        return False
 
-    price = item.get("price")
+    updated = parse_datetime(item.get("updated_utc"))
+    if updated is None:
+        return False
 
-    if price is None:
-        raise ValueError(f"Missing price: {asset_id}")
+    age = (datetime.now(timezone.utc) - updated).total_seconds() / 60
 
-    price = float(price)
+    if age < -5 or age > MAX_DATA_AGE_MINUTES:
+        return False
 
-    if not price > 0:
-        raise ValueError(f"Invalid price: {asset_id}")
+    unit = str(item.get("unit", "")).upper()
 
-    updated = parse_api_time(item.get("updated_utc"))
+    if expected_unit and unit != expected_unit:
+        return False
 
-    now = datetime.now(timezone.utc)
+    price = to_float(item.get("price"))
 
-    age = (now - updated).total_seconds() / 60
+    if price is None or price <= 0:
+        return False
 
-    if age < -5:
-        raise ValueError(f"Future timestamp: {asset_id}")
+    return True
 
-    if age > MAX_PRICE_AGE_MINUTES:
-        raise ValueError(
-            f"Price is too old: {asset_id}, age={age:.1f} minutes"
-        )
-
-    return updated, price
-
-
-# ==========================================
-# 5. FETCH MARKET DATA
-# ==========================================
 
 async def fetch_market_data(force_refresh=False):
+    global market_cache, cache_time
 
     async with cache_lock:
-
-        now = time.monotonic()
+        now = asyncio.get_running_loop().time()
 
         if (
             not force_refresh
-            and price_cache["data"] is not None
-            and now - price_cache["time"] < CACHE_SECONDS
+            and market_cache is not None
+            and now - cache_time < CACHE_SECONDS
         ):
-            return price_cache["data"]
+            return market_cache
 
-        logger.info("Fetching market prices...")
+        try:
+            async with httpx.AsyncClient(
+                timeout=20,
+                follow_redirects=True,
+            ) as client:
+                response = await client.get(API_URL)
+                response.raise_for_status()
+                data = response.json()
 
-        async with httpx.AsyncClient(
-            timeout=20.0,
-            follow_redirects=True,
-            headers={
-                "User-Agent": "IranTelegramPriceBot/1.0"
-            }
-        ) as client:
+            raw_items = data.get("items", [])
 
-            response = await client.get(API_URL)
-            response.raise_for_status()
+            if not isinstance(raw_items, list):
+                raise ValueError("ساختار پاسخ API معتبر نیست.")
 
-            result = response.json()
+            result = {}
 
-        if not isinstance(result, dict):
-            raise ValueError("Invalid API response")
+            for item in raw_items:
+                if not isinstance(item, dict):
+                    continue
 
-        if not isinstance(result.get("items"), list):
-            raise ValueError("API items are missing")
+                asset_id = item.get("id")
 
-        items = {
-            item["id"]: item
-            for item in result["items"]
-            if isinstance(item, dict) and item.get("id")
-        }
+                if not asset_id:
+                    continue
 
-        data = {
-            "currencies": {},
-            "metals": {},
-            "crypto": {},
-            "updated": None
-        }
+                expected_unit = None
 
-        timestamps = []
+                if asset_id in CURRENCIES or asset_id in METALS:
+                    expected_unit = "IRT"
+                elif asset_id in CRYPTOS:
+                    expected_unit = "USDT"
 
-        # ----------------------------------
-        # CURRENCIES
-        # ----------------------------------
+                if validate_item(item, expected_unit):
+                    result[asset_id] = item
 
-        for asset_id, name in CURRENCIES.items():
-
-            item = items.get(asset_id)
-
-            updated, price = validate_item(item, asset_id)
-
-            if item.get("unit") != "IRT":
+            # برای نمایش نرخ اصلی، دلار و طلای ۱۸ عیار ضروری هستند.
+            if "usd" not in result or "gold-18k" not in result:
                 raise ValueError(
-                    f"Unexpected currency unit: {asset_id}"
+                    "اطلاعات معتبر دلار یا طلای ۱۸ عیار از API دریافت نشد."
                 )
 
-            data["currencies"][asset_id] = {
-                "name": name,
-                "price": int(price)
-            }
+            market_cache = result
+            cache_time = now
 
-            timestamps.append(updated)
+            return result
 
-        # ----------------------------------
-        # GOLD AND COINS
-        # ----------------------------------
+        except Exception as error:
+            logger.exception("خطا در دریافت اطلاعات بازار: %s", error)
 
-        for asset_id, name in METALS.items():
+            if market_cache is not None:
+                return market_cache
 
-            item = items.get(asset_id)
+            raise
 
-            updated, price = validate_item(item, asset_id)
 
-            if item.get("unit") != "IRT":
-                raise ValueError(
-                    f"Unexpected metal unit: {asset_id}"
-                )
+# -------------------- تبدیل و نمایش قیمت --------------------
 
-            data["metals"][asset_id] = {
-                "name": name,
-                "price": int(price)
-            }
+def format_toman(price):
+    return f"{int(round(price / 10)):,} تومان"
 
-            timestamps.append(updated)
 
-        # ----------------------------------
-        # USDT PRICE
-        # ----------------------------------
+def get_item_price(item):
+    return to_float(item.get("price"))
 
-        usdt_price = data["currencies"]["usdt"]["price"]
 
-        # ----------------------------------
-        # CRYPTOCURRENCIES
-        # ----------------------------------
+def get_crypto_price_irt(item, usdt_item):
+    direct_price = to_float(item.get("price_irt"))
 
-        for asset_id, info in CRYPTO.items():
+    if direct_price and direct_price > 0:
+        return direct_price
 
-            item = items.get(asset_id)
+    crypto_price = get_item_price(item)
+    usdt_price = get_item_price(usdt_item)
 
-            if not item:
-                logger.warning(
-                    "Crypto unavailable: %s", asset_id
-                )
-                continue
+    if not crypto_price or not usdt_price:
+        return None
 
-            try:
+    return crypto_price * usdt_price
 
-                updated, price_usdt = validate_item(
-                    item, asset_id
-                )
 
-                if item.get("unit") != "USDT":
-                    raise ValueError(
-                        f"Unexpected crypto unit: {asset_id}"
-                    )
+def get_latest_update(data):
+    dates = []
 
-                direct_irt = item.get("price_irt")
+    for item in data.values():
+        updated = parse_datetime(item.get("updated_utc"))
+        if updated:
+            dates.append(updated)
 
-                if direct_irt is not None and float(direct_irt) > 0:
+    if not dates:
+        return "نامشخص"
 
-                    price_toman = int(float(direct_irt))
-                    estimated = False
+    latest = min(dates)
+    return latest.astimezone().strftime("%Y/%m/%d - %H:%M:%S")
 
-                else:
 
-                    price_toman = int(price_usdt * usdt_price)
-                    estimated = True
+def build_price_message(data):
+    lines = ["📊 **نرخ روز بازار**", ""]
 
-                data["crypto"][asset_id] = {
-                    "symbol": info[0],
-                    "name": info[1],
-                    "price_usdt": price_usdt,
-                    "price_toman": price_toman,
-                    "estimated": estimated
-                }
+    lines.append("💱 **ارزها**")
 
-                timestamps.append(updated)
+    for asset_id, name in CURRENCIES.items():
+        item = data.get(asset_id)
 
-            except (ValueError, TypeError) as error:
+        if item:
+            price = get_item_price(item)
+            lines.append(f"▪️ {name}: {format_toman(price)}")
+        else:
+            lines.append(f"▪️ {name}: اطلاعات در دسترس نیست")
 
-                logger.warning(
-                    "Skipping crypto %s: %s",
-                    asset_id,
-                    error
-                )
+    lines.append("")
+    lines.append("🪙 **طلا و سکه**")
 
-        if not timestamps:
-            raise ValueError("No valid prices received")
+    for asset_id, name in METALS.items():
+        item = data.get(asset_id)
 
-        data["updated"] = min(timestamps)
+        if item:
+            price = get_item_price(item)
+            lines.append(f"▪️ {name}: {format_toman(price)}")
+        else:
+            lines.append(f"▪️ {name}: اطلاعات در دسترس نیست")
 
-        # Cache only completely validated main market data
-        price_cache["data"] = data
-        price_cache["time"] = time.monotonic()
+    # محاسبه ارزش تقریبی طلای موجود در سکه امامی
+    gold_18k = data.get("gold-18k")
+    coin = data.get("coin-emami")
 
-        logger.info("Market data updated successfully")
+    if gold_18k and coin:
+        gold_price = get_item_price(gold_18k)
+        coin_price = get_item_price(coin)
 
-        return data
+        if gold_price and coin_price:
+            gold_value = gold_price * (8.133 * 0.9 / 0.75)
+            bubble = coin_price - gold_value
 
-
-# ==========================================
-# 6. COIN BUBBLE
-# ==========================================
-
-def calculate_coin_bubble(gold_18k, coin_price):
-
-    # Emami coin:
-    # 8.133 grams, 900/1000 gold purity.
-    # Convert pure gold weight to 18K equivalent.
-
-    gold_equivalent_weight = 8.133 * 0.9 / 0.75
-
-    intrinsic_value = gold_equivalent_weight * gold_18k
-
-    if intrinsic_value <= 0:
-        return 0, 0, 0
-
-    bubble_amount = coin_price - intrinsic_value
-
-    bubble_percent = (
-        bubble_amount / intrinsic_value
-    ) * 100
-
-    return (
-        round(intrinsic_value),
-        round(bubble_amount),
-        round(bubble_percent, 1)
-    )
-
-
-# ==========================================
-# 7. PRICE FORMAT
-# ==========================================
-
-def format_number(number):
-    return f"{number:,}"
-
-
-def get_price_text(prices):
-
-    text = (
-        "📊 *قیمت لحظه‌ای بازار آزاد ایران*\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-    )
-
-    # CURRENCIES
-
-    text += "💱 *ارزهای خارجی*\n\n"
-
-    for item in prices["currencies"].values():
-
-        text += (
-            f"{item['name']}: "
-            f"`{format_number(item['price'])}` تومان\n"
-        )
-
-    # GOLD AND COINS
-
-    text += "\n━━━━━━━━━━━━━━━━━━\n"
-    text += "🟡 *طلا و سکه*\n\n"
-
-    for item in prices["metals"].values():
-
-        text += (
-            f"{item['name']}: "
-            f"`{format_number(item['price'])}` تومان\n"
-        )
-
-    # COIN BUBBLE
-
-    gold_price = prices["metals"]["gold-18k"]["price"]
-
-    coin_price = prices["metals"]["coin-emami"]["price"]
-
-    intrinsic, bubble, percentage = calculate_coin_bubble(
-        gold_price,
-        coin_price
-    )
-
-    text += "\n🔍 *تحلیل حباب سکه امامی*\n\n"
-
-    text += (
-        f"ارزش ذاتی: `{format_number(intrinsic)}` تومان\n"
-        f"میزان حباب: `{format_number(bubble)}` تومان\n"
-        f"درصد حباب: `{percentage}%`\n"
-    )
-
-    # CRYPTO
-
-    text += "\n━━━━━━━━━━━━━━━━━━\n"
-    text += "🪙 *ارزهای دیجیتال*\n\n"
-
-    if prices["crypto"]:
-
-        for item in prices["crypto"].values():
-
-            text += (
-                f"{item['symbol']} *{item['name']}*\n"
-                f"قیمت دلاری: "
-                f"`{item['price_usdt']:,.4f}` USDT\n"
-                f"قیمت تومانی: "
-                f"`{format_number(item['price_toman'])}` تومان"
+            lines.append("")
+            lines.append(
+                f"▪️ حباب تقریبی سکه امامی: {format_toman(bubble)}"
             )
 
-            if item["estimated"]:
-                text += " (تخمینی با نرخ تتر)"
+    lines.append("")
+    lines.append("₿ **ارزهای دیجیتال**")
 
-            text += "\n\n"
+    usdt_item = data.get("usdt")
 
-    else:
+    for asset_id, name in CRYPTOS.items():
+        item = data.get(asset_id)
 
-        text += "اطلاعات رمزارزها در دسترس نیست.\n"
+        if item and usdt_item:
+            price = get_crypto_price_irt(item, usdt_item)
 
-    # LAST UPDATE
+            if price:
+                lines.append(f"▪️ {name}: {format_toman(price)}")
+            else:
+                lines.append(f"▪️ {name}: اطلاعات در دسترس نیست")
+        else:
+            lines.append(f"▪️ {name}: اطلاعات در دسترس نیست")
 
-    updated = prices["updated"].astimezone(
-        TEHRAN_TIMEZONE
-    )
+    lines.append("")
+    lines.append(f"🕒 آخرین به‌روزرسانی: {get_latest_update(data)}")
+    lines.append("")
+    lines.append("منبع: NerkhAra")
 
-    updated_text = updated.strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
-
-    text += "\n━━━━━━━━━━━━━━━━━━\n"
-
-    text += (
-        f"🕒 قدیمی‌ترین زمان ثبت نرخ‌های اصلی: "
-        f"`{updated_text}`\n"
-    )
-
-    text += (
-        "🌐 منبع: [NerkhAra](https://nerkhara.com/)\n"
-    )
-
-    text += "\n⚠️ نرخ‌ها مربوط به بازار آزاد هستند."
-
-    return text
+    return "\n".join(lines)
 
 
-# ==========================================
-# 8. KEYBOARD
-# ==========================================
+async def send_all_prices(update, context, force_refresh=False):
+    try:
+        data = await fetch_market_data(force_refresh)
+        message = build_price_message(data)
 
-def get_keyboard():
+        await update.message.reply_text(
+            message,
+            parse_mode="Markdown",
+        )
 
+    except Exception:
+        await update.message.reply_text(
+            "❌ در حال حاضر دریافت نرخ‌ها امکان‌پذیر نیست. لطفاً کمی بعد دوباره تلاش کنید."
+        )
+
+
+# -------------------- دستور شروع --------------------
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [
             InlineKeyboardButton(
-                "🔄 به‌روزرسانی قیمت‌ها",
-                callback_data="refresh_prices"
+                "📊 نمایش نرخ روز",
+                callback_data="show_rates",
             )
         ]
     ]
 
-    return InlineKeyboardMarkup(keyboard)
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "سلام به ACCB bot خوش اومدین 👋",
+        reply_markup=reply_markup,
+    )
 
 
-# ==========================================
-# 9. PRICE COMMAND
-# ==========================================
+# -------------------- دستور نرخ کامل --------------------
 
-async def price_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    force_refresh=False
-):
+async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_all_prices(update, context)
 
+
+# -------------------- نمایش فقط دلار --------------------
+
+async def dollar_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
+        data = await fetch_market_data()
+        item = data.get("usd")
 
-        prices = await fetch_market_data(
-            force_refresh=force_refresh
-        )
+        if not item:
+            raise ValueError("قیمت دلار موجود نیست.")
 
-        text = get_price_text(prices)
-
-        if update.callback_query:
-
-            await update.callback_query.message.edit_text(
-                text,
-                reply_markup=get_keyboard(),
-                parse_mode=ParseMode.MARKDOWN,
-                disable_web_page_preview=True
-            )
-
-        elif update.message:
-
-            await update.message.reply_text(
-                text,
-                reply_markup=get_keyboard(),
-                parse_mode=ParseMode.MARKDOWN,
-                disable_web_page_preview=True
-            )
-
-    except Exception:
-
-        logger.exception("Unable to fetch market prices")
-
-        error_text = (
-            "⚠️ *دریافت قیمت‌ها ناموفق بود.*\n\n"
-            "اطلاعات معتبر از منبع قیمت دریافت نشد "
-            "یا داده‌های دریافتی قدیمی بودند.\n\n"
-            "لطفاً چند دقیقه دیگر دوباره تلاش کن."
-        )
-
-        try:
-
-            if update.callback_query:
-
-                await update.callback_query.message.edit_text(
-                    error_text,
-                    reply_markup=get_keyboard(),
-                    parse_mode=ParseMode.MARKDOWN
-                )
-
-            elif update.message:
-
-                await update.message.reply_text(
-                    error_text,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-
-        except Exception:
-
-            logger.exception("Unable to send error message")
-
-
-# ==========================================
-# 10. REFRESH BUTTON
-# ==========================================
-
-async def button_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    if query.data == "refresh_prices":
-
-        await query.answer(
-            "در حال دریافت قیمت‌های جدید..."
-        )
-
-        await price_command(
-            update,
-            context,
-            force_refresh=True
-        )
-
-
-# ==========================================
-# 11. NORMAL MESSAGES
-# ==========================================
-
-async def handle_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    user_text = update.message.text.strip().lower()
-
-    keywords = [
-        "قیمت",
-        "دلار",
-        "طلا",
-        "سکه",
-        "ارز",
-        "قیمتها",
-        "نرخ",
-        "یورو",
-        "پوند",
-        "تتر"
-    ]
-
-    if any(word in user_text for word in keywords):
-
-        await price_command(update, context)
-
-    else:
+        price = get_item_price(item)
 
         await update.message.reply_text(
-            "سلام! 👋\n\n"
-            "برای مشاهده قیمت‌های بازار دستور زیر را ارسال کن:\n\n"
-            "/price"
+            f"💵 **قیمت دلار آمریکا**\n\n"
+            f"▪️ {format_toman(price)}\n\n"
+            f"🕒 آخرین به‌روزرسانی: {get_latest_update({'usd': item})}",
+            parse_mode="Markdown",
+        )
+
+    except Exception:
+        await update.message.reply_text(
+            "❌ دریافت قیمت دلار با مشکل مواجه شد. لطفاً بعداً تلاش کنید."
         )
 
 
-# ==========================================
-# 12. RAILWAY WEB SERVER
-# ==========================================
+# -------------------- نمایش فقط طلای ۱۸ عیار --------------------
 
-class SimpleHandler(BaseHTTPRequestHandler):
+async def gold_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        data = await fetch_market_data()
+        item = data.get("gold-18k")
 
+        if not item:
+            raise ValueError("قیمت طلای ۱۸ عیار موجود نیست.")
+
+        price = get_item_price(item)
+
+        await update.message.reply_text(
+            f"🪙 **قیمت طلای ۱۸ عیار**\n\n"
+            f"▪️ هر گرم: {format_toman(price)}\n\n"
+            f"🕒 آخرین به‌روزرسانی: {get_latest_update({'gold-18k': item})}",
+            parse_mode="Markdown",
+        )
+
+    except Exception:
+        await update.message.reply_text(
+            "❌ دریافت قیمت طلای ۱۸ عیار با مشکل مواجه شد. لطفاً بعداً تلاش کنید."
+        )
+
+
+# -------------------- دریافت پیام‌های فارسی --------------------
+
+async def text_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
+    if text == "دلار":
+        await dollar_command(update, context)
+
+    elif text == "طلا":
+        await gold_command(update, context)
+
+    elif text == "نرخ":
+        await price_command(update, context)
+
+
+# -------------------- دکمه نمایش نرخ روز --------------------
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "show_rates":
+        try:
+            data = await fetch_market_data()
+            message = build_price_message(data)
+
+            await query.message.reply_text(
+                message,
+                parse_mode="Markdown",
+            )
+
+        except Exception:
+            await query.message.reply_text(
+                "❌ در حال حاضر دریافت نرخ‌ها امکان‌پذیر نیست. لطفاً کمی بعد دوباره تلاش کنید."
+            )
+
+    elif query.data == "refresh_rates":
+        try:
+            data = await fetch_market_data(force_refresh=True)
+            message = build_price_message(data)
+
+            await query.message.reply_text(
+                message,
+                parse_mode="Markdown",
+            )
+
+        except Exception:
+            await query.message.reply_text(
+                "❌ به‌روزرسانی نرخ‌ها ناموفق بود. لطفاً دوباره تلاش کنید."
+            )
+
+
+# -------------------- سرور سلامت Railway --------------------
+
+class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-
         self.send_response(200)
-
-        self.send_header(
-            "Content-Type",
-            "text/plain; charset=utf-8"
-        )
-
+        self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-
-        self.wfile.write(
-            b"Telegram Price Bot is running!"
-        )
+        self.wfile.write(b"ACCB Bot is running!")
 
     def log_message(self, format, *args):
         pass
 
 
-def run_web_server():
-
+def run_health_server():
     port = int(os.environ.get("PORT", 10000))
-
-    server = ThreadingHTTPServer(
-        ("0.0.0.0", port),
-        SimpleHandler
-    )
-
-    logger.info(
-        "Web server started on port %s",
-        port
-    )
-
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
     server.serve_forever()
 
 
-# ==========================================
-# 13. MAIN
-# ==========================================
+# -------------------- اجرای ربات --------------------
 
 def main():
-
     if not TOKEN:
+        raise RuntimeError("متغیر محیطی TOKEN تنظیم نشده است.")
 
-        raise RuntimeError(
-            "TOKEN environment variable is missing!"
-        )
+    threading.Thread(
+        target=run_health_server,
+        daemon=True,
+    ).start()
 
-    server_thread = threading.Thread(
-        target=run_web_server,
-        daemon=True
-    )
+    application = Application.builder().token(TOKEN).build()
 
-    server_thread.start()
-
-    application = (
-        ApplicationBuilder()
-        .token(TOKEN)
-        .build()
-    )
-
-    application.add_handler(
-        CommandHandler("start", price_command)
-    )
-
-    application.add_handler(
-        CommandHandler("price", price_command)
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(button_handler)
-    )
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("price", price_command))
 
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            handle_message
+            text_command,
         )
     )
 
-    logger.info("Telegram Price Bot is starting...")
-
-    application.run_polling(
-        drop_pending_updates=True
+    application.add_handler(
+        CallbackQueryHandler(button_callback)
     )
+
+    logger.info("ACCB Bot started successfully.")
+
+    application.run_polling()
 
 
 if __name__ == "__main__":
