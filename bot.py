@@ -545,6 +545,11 @@ async def start_command(
 
     await update.message.reply_text(
         "سلام به ACCB bot خوش اومدین 👋",
+        "",
+        "لیست دستورات:",
+        "نرخ' = نمایش نرخ روز تمامی ارز ها'",
+        "دلار' = نمایش نرخ روز دلاز آمریکا'",
+        "'طلا' =نمایش نرخ روز طلای 18 عیار",
         reply_markup=get_start_keyboard(),
     )
 
