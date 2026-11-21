@@ -543,13 +543,18 @@ async def start_command(
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    await update.message.reply_text(
-        "سلام به ACCB bot خوش اومدین 👋",
-        "",
-        "لیست دستورات:",
-        "نرخ = نمایش نرخ روز تمامی ارز ها",
-        "دلار = نمایش نرخ روز دلاز آمریکا",
-        "طلا = نمایش نرخ روز طلای 18 عیار",
+    welcome_message = (
+        "سلام به ACCB bot خوش اومدین 👋\n\n"
+        "📋 **لیست دستورات:**\n\n"
+        "🔹 نرخ = نمایش نرخ روز تمامی ارزها\n"
+        "🔹 دلار = نمایش نرخ روز دلار آمریکا\n"
+        "🔹 طلا = نمایش نرخ روز طلای ۱۸ عیار\n\n"
+        "برای مشاهده نرخ کامل بازار، روی دکمه زیر کلیک کنید."
+    )
+
+    await update.effective_message.reply_text(
+        welcome_message,
+        parse_mode="Markdown",
         reply_markup=get_start_keyboard(),
     )
 
