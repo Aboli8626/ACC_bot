@@ -1,3 +1,4 @@
+
 import os
 import time
 import logging
@@ -147,7 +148,6 @@ async def fetch_market_data(force_refresh=False):
 
         now = time.monotonic()
 
-        # استفاده از اطلاعات کش‌شده
         if (
             not force_refresh
             and price_cache["data"] is not None
@@ -184,14 +184,12 @@ async def fetch_market_data(force_refresh=False):
                 if not asset_id:
                     continue
 
-                # واحد ارزها، طلا و تتر: تومان
                 if (
                     asset_id in CURRENCIES
                     or asset_id in METALS
                 ):
                     expected_unit = "IRT"
 
-                # واحد رمزارزها: تتر
                 elif asset_id in CRYPTOS:
                     expected_unit = "USDT"
 
@@ -201,7 +199,6 @@ async def fetch_market_data(force_refresh=False):
                 if validate_item(item, expected_unit):
                     result[asset_id] = item
 
-            # اطلاعات ضروری
             required_items = [
                 "usd",
                 "gold-18k",
@@ -235,7 +232,6 @@ async def fetch_market_data(force_refresh=False):
 # ==================================================
 
 def format_toman(price):
-    # قیمت IRT در API از قبل به تومان است.
     return f"{int(round(price)):,} تومان"
 
 
@@ -245,13 +241,11 @@ def get_item_price(item):
 
 def get_crypto_price_irt(item, usdt_item):
 
-    # قیمت مستقیم تومانی در صورت وجود
     direct_price = to_float(item.get("price_irt"))
 
     if direct_price is not None and direct_price > 0:
         return direct_price
 
-    # تبدیل قیمت رمزارز با نرخ تتر
     crypto_price = get_item_price(item)
     usdt_price = get_item_price(usdt_item)
 
@@ -455,9 +449,9 @@ def get_price_text(data):
         "━━━━━━━━━━━━━━",
         f"🕒 **آخرین به‌روزرسانی:** {get_latest_update(data)}",
         "",
-        "ساخته شده توسط @not_anyone07",
         "🌐 منبع اطلاعات: NerkhAra",
         "🤖 **ACCB Bot**",
+        "✍️ ساخته شده توسط @not_anyone07",
     ])
 
     return "\n".join(lines)
@@ -477,9 +471,7 @@ def get_dollar_text(data):
     price = get_item_price(item)
 
     return (
-        "╭━━━━━━━━━━━━━━╮\n"
-        "💵 **قیمت دلار آمریکا**\n"
-        "╰━━━━━━━━━━━━━━╯\n\n"
+        "💵 **قیمت دلار آمریکا**\n\n"
         f"🇺🇸 **هر دلار:** {format_toman(price)}\n\n"
         f"🕒 آخرین به‌روزرسانی: "
         f"{get_latest_update({'usd': item})}\n\n"
@@ -501,9 +493,7 @@ def get_gold_text(data):
     price = get_item_price(item)
 
     return (
-        "╭━━━━━━━━━━━━━━╮\n"
-        "🪙 **قیمت طلای ۱۸ عیار**\n"
-        "╰━━━━━━━━━━━━━━╯\n\n"
+        "🪙 **قیمت طلای ۱۸ عیار**\n\n"
         f"✨ **هر گرم طلا:** {format_toman(price)}\n\n"
         f"🕒 آخرین به‌روزرسانی: "
         f"{get_latest_update({'gold-18k': item})}\n\n"
@@ -684,7 +674,6 @@ async def button_handler(
 
     query = update.callback_query
 
-    # تشخیص دکمه
     if query.data == "show_rates":
 
         await query.answer()
@@ -710,7 +699,6 @@ async def button_handler(
 
         return
 
-    # نوع پیام موردنظر برای به‌روزرسانی
     refresh_type = query.data.replace(
         "refresh_",
         "",
@@ -718,6 +706,7 @@ async def button_handler(
     )
 
     if refresh_type not in ("all", "usd", "gold"):
+
         await query.answer()
         return
 
@@ -728,12 +717,10 @@ async def button_handler(
 
     try:
 
-        # دریافت اطلاعات جدید از API
         data = await fetch_market_data(
             force_refresh=True
         )
 
-        # ساخت محتوای مخصوص همان پیام
         if refresh_type == "all":
 
             message = get_price_text(data)
@@ -764,8 +751,6 @@ async def button_handler(
             error,
         )
 
-        # اگر متن تغییر نکرده باشد، تلگرام خطا می‌دهد.
-        # در این حالت پیام جدید نمی‌فرستیم.
         try:
 
             await query.answer(
@@ -839,7 +824,6 @@ def main():
         .build()
     )
 
-    # دستورات اسلش‌دار
     application.add_handler(
         CommandHandler(
             "start",
@@ -854,14 +838,12 @@ def main():
         )
     )
 
-    # دکمه‌های شیشه‌ای
     application.add_handler(
         CallbackQueryHandler(
             button_handler,
         )
     )
 
-    # پیام‌های فارسی
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
