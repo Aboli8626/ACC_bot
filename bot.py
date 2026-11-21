@@ -454,6 +454,7 @@ def get_price_text(data):
         "",
         "━━━━━━━━━━━━━━",
         f"🕒 **آخرین به‌روزرسانی:** {get_latest_update(data)}",
+        "",
         "ساخته شده توسط @not_anyone07",
         "🌐 منبع اطلاعات: NerkhAra",
         "🤖 **ACCB Bot**",
